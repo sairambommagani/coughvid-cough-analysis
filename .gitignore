@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+data/
+artifacts/
+.pytest_cache/
+*_log*.txt
+*.pth
+artifacts_*/
+models/
+*.mp4
+samples/
