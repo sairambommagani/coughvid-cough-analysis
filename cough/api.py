@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 import torch
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse
 
 from .audio import load_audio
 from .cnn import CoughCNN, Normaliser, predict
@@ -160,9 +161,32 @@ def eng() -> Engine:
 def warm_up():
     try:
         eng()
-        print("models loaded - open http://localhost:8008/docs", flush=True)
+        print("models loaded - interface: http://localhost:8008  (API docs: http://localhost:8008/docs)", flush=True)
     except Exception as ex:
         print(f"warm-up skipped: {ex}", flush=True)
+
+
+UI = Path(__file__).parent / "static" / "index.html"
+MEDIA = {".webm": "audio/webm", ".ogg": "audio/ogg", ".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4"}
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+def ui():
+    """Web interface: record or upload a cough, or pick a test-set recording."""
+    return HTMLResponse(UI.read_text(encoding="utf-8"))
+
+
+@app.get("/examples/{uuid}/audio")
+def example_audio(uuid: str):
+    """The audio file of a test-set recording (for playback in the interface)."""
+    e = eng()
+    row = e.examples[e.examples["uuid"] == uuid]
+    if row.empty:
+        raise HTTPException(404, "uuid not in the test set")
+    path = Path(str(row.iloc[0]["path"]))
+    if not path.exists():
+        raise HTTPException(404, f"audio file not found: {path}")
+    return FileResponse(path, media_type=MEDIA.get(path.suffix.lower(), "application/octet-stream"))
 
 
 @app.get("/health")

@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cough Analysis</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --panel: #ffffff; --ink: #1d1d1f; --muted: #6b6b70; --line: #dcdcd8;
+    --accent: #2f4a6d; --soft: #eef1f5; --warn: #8a5a00; --warnbg: #fbf3e2; --ok: #2f5d3a; --okbg: #e9f2eb;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 14px/1.5 -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
+  header { padding: 18px 28px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { margin: 0; font-size: 20px; font-weight: 600; }
+  header p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+  main { display: grid; grid-template-columns: 360px 1fr; gap: 20px; padding: 20px 28px; max-width: 1280px; margin: 0 auto; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 16px; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; }
+  h2 { font-size: 14px; margin: 0 0 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); font-weight: 600; }
+  .tabs { display: flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; margin-bottom: 14px; }
+  .tabs button { flex: 1; border: 0; background: var(--panel); padding: 8px 4px; cursor: pointer; font: inherit; color: var(--muted); }
+  .tabs button.on { background: var(--accent); color: #fff; }
+  .tab { display: none; } .tab.on { display: block; }
+  .btn { border: 1px solid var(--accent); background: var(--accent); color: #fff; padding: 8px 14px; border-radius: 6px;
+         cursor: pointer; font: inherit; }
+  .btn.ghost { background: var(--panel); color: var(--accent); }
+  .btn:disabled { opacity: .45; cursor: default; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
+  .hint { color: var(--muted); font-size: 12px; }
+  select, input[type=file] { font: inherit; }
+  select { padding: 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
+  .examples { list-style: none; margin: 10px 0 0; padding: 0; }
+  .examples li { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; cursor: pointer; }
+  .examples li:hover { border-color: var(--accent); background: var(--soft); }
+  .examples .id { font-family: Consolas, monospace; font-size: 12px; color: var(--muted); }
+  .rec-dot { width: 10px; height: 10px; border-radius: 50%; background: #b3261e; display: inline-block; animation: blink 1s infinite; }
+  @keyframes blink { 50% { opacity: .2; } }
+  #wave { width: 100%; height: 110px; display: block; background: var(--soft); border-radius: 6px; }
+  audio { width: 100%; margin-top: 8px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-top: 14px; }
+  .card { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+  .card h3 { margin: 0 0 6px; font-size: 13px; color: var(--muted); font-weight: 600; }
+  .big { font-size: 22px; font-weight: 600; }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; margin-left: 6px; vertical-align: middle; }
+  .tag.ok { background: var(--okbg); color: var(--ok); } .tag.warn { background: var(--warnbg); color: var(--warn); }
+  .bar { position: relative; height: 10px; background: var(--soft); border-radius: 5px; margin: 8px 0 4px; }
+  .bar i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent); border-radius: 5px; }
+  .bar b { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--ink); }
+  .why { margin: 6px 0 0; padding-left: 18px; color: var(--muted); font-size: 12px; }
+  .note { font-size: 12px; color: var(--muted); }
+  .msg { border: 1px solid var(--line); background: var(--warnbg); color: var(--warn); border-radius: 8px; padding: 12px 14px; margin-top: 14px; }
+  .disclaimer { margin-top: 14px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 10px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; }
+  td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
+  .empty { color: var(--muted); text-align: center; padding: 40px 0; }
+  .spin { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--line); border-top-color: var(--accent);
+          border-radius: 50%; animation: s 0.8s linear infinite; vertical-align: middle; }
+  @keyframes s { to { transform: rotate(360deg); } }
+  .full { grid-column: 1 / -1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Cough Analysis</h1>
+  <p>Cough check, wet/dry cough type, COVID-19 and respiratory-symptom risk from a cough recording (COUGHVID v3 models).</p>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>Input</h2>
+    <div class="tabs">
+      <button data-tab="t-rec" class="on">Record</button>
+      <button data-tab="t-up">Upload</button>
+      <button data-tab="t-ex">Test set</button>
+    </div>
+
+    <div id="t-rec" class="tab on">
+      <p class="hint">Cough 2-3 times in a quiet place, about 20 cm from the microphone. Recording stops after 10 s.</p>
+      <div class="row">
+        <button class="btn" id="recBtn">Start recording</button>
+        <span id="recState" class="hint"></span>
+      </div>
+      <div class="row"><button class="btn ghost" id="recGo" disabled>Analyse recording</button></div>
+    </div>
+
+    <div id="t-up" class="tab">
+      <p class="hint">webm, ogg, wav, mp3 or m4a.</p>
+      <div class="row"><input type="file" id="file" accept=".webm,.ogg,.wav,.mp3,.m4a,audio/*"></div>
+      <div class="row"><button class="btn ghost" id="upGo" disabled>Analyse file</button></div>
+    </div>
+
+    <div id="t-ex" class="tab">
+      <p class="hint">Recordings from the test split, never used for training. The true label is shown next to the result.</p>
+      <div class="row">
+        <select id="exStatus">
+          <option value="">any status</option>
+          <option>healthy</option><option>symptomatic</option><option>COVID-19</option>
+        </select>
+        <button class="btn ghost" id="exLoad">Load examples</button>
+      </div>
+      <ul class="examples" id="exList"></ul>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Result</h2>
+    <div id="result"><div class="empty">Record, upload or pick a test-set recording to see the analysis.</div></div>
+  </section>
+
+  <section class="panel full">
+    <h2>Model performance (test set, ROC-AUC)</h2>
+    <div id="perf" class="note">Loading...</div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const pct = (x) => (x * 100).toFixed(1) + "%";
+let seed = 0;
+
+// ---------- tabs
+document.querySelectorAll(".tabs button").forEach((b) => b.onclick = () => {
+  document.querySelectorAll(".tabs button").forEach((x) => x.classList.toggle("on", x === b));
+  document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("on", t.id === b.dataset.tab));
+});
+
+// ---------- recording (MediaRecorder -> webm/opus, the same format as COUGHVID)
+let recorder = null, chunks = [], recBlob = null, timer = null;
+$("recBtn").onclick = async () => {
+  if (recorder && recorder.state === "recording") { recorder.stop(); return; }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    chunks = [];
+    recorder = new MediaRecorder(stream);
+    recorder.ondataavailable = (e) => chunks.push(e.data);
+    recorder.onstop = () => {
+      clearInterval(timer);
+      stream.getTracks().forEach((t) => t.stop());
+      recBlob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+      $("recBtn").textContent = "Record again";
+      $("recState").textContent = "recorded " + (recBlob.size / 1024).toFixed(0) + " KB";
+      $("recGo").disabled = false;
+      showAudio(recBlob);
+    };
+    recorder.start();
+    let t = 0;
+    $("recBtn").textContent = "Stop";
+    $("recState").innerHTML = '<span class="rec-dot"></span> recording 0 s';
+    $("recGo").disabled = true;
+    timer = setInterval(() => {
+      t += 1;
+      $("recState").innerHTML = '<span class="rec-dot"></span> recording ' + t + " s";
+      if (t >= 10) recorder.stop();
+    }, 1000);
+  } catch (e) {
+    $("recState").textContent = "microphone not available: " + e.message;
+  }
+};
+$("recGo").onclick = () => recBlob && analyseBlob(recBlob, "recording.webm");
+
+// ---------- upload
+$("file").onchange = () => { $("upGo").disabled = !$("file").files.length; };
+$("upGo").onclick = () => {
+  const f = $("file").files[0];
+  if (f) analyseBlob(f, f.name);
+};
+
+// ---------- test-set examples
+$("exLoad").onclick = async () => {
+  const st = $("exStatus").value;
+  const url = "/examples?n=6&seed=" + (seed++) + (st ? "&status=" + encodeURIComponent(st) : "");
+  $("exList").innerHTML = '<li><span class="spin"></span></li>';
+  const r = await fetch(url);
+  const ex = await r.json();
+  $("exList").innerHTML = "";
+  ex.forEach((e) => {
+    const li = document.createElement("li");
+    li.innerHTML = "<div><b>" + (e.status || "status not given") + "</b>" +
+      (e.exp_cough_type ? " &middot; experts: " + e.exp_cough_type : "") + "</div>" +
+      '<div class="id">' + e.uuid + "</div>";
+    li.onclick = () => analyseExample(e.uuid);
+    $("exList").appendChild(li);
+  });
+  if (!ex.length) $("exList").innerHTML = '<li class="hint">no recordings with this status</li>';
+};
+
+// ---------- calls
+function busy(text) { $("result").innerHTML = '<div class="empty"><span class="spin"></span> ' + text + "</div>"; }
+
+async function analyseBlob(blob, name) {
+  busy("Analysing...");
+  const fd = new FormData();
+  fd.append("file", blob, name);
+  const r = await fetch("/analyze", { method: "POST", body: fd });
+  const res = await r.json();
+  if (!r.ok) return error(res);
+  render(res, blob);
+}
+
+async function analyseExample(uuid) {
+  busy("Analysing test-set recording...");
+  const [r, a] = await Promise.all([fetch("/examples/" + uuid + "/analyze"), fetch("/examples/" + uuid + "/audio")]);
+  const res = await r.json();
+  if (!r.ok) return error(res);
+  render(res, a.ok ? await a.blob() : null);
+}
+
+function error(res) {
+  $("result").innerHTML = '<div class="msg">' + (res.detail || "Something went wrong") + "</div>";
+}
+
+// ---------- rendering
+function showAudio(blob) {
+  const old = document.querySelector("#result audio");
+  if (old) old.remove();
+}
+
+function bar(p, thr) {
+  return '<div class="bar"><i style="width:' + Math.min(100, p * 100) + '%"></i>' +
+    (thr != null ? '<b style="left:' + Math.min(100, thr * 100) + '%" title="threshold"></b>' : "") + "</div>";
+}
+
+function why(list) {
+  return list && list.length ? '<ul class="why">' + list.map((w) => "<li>" + w + "</li>").join("") + "</ul>" : "";
+}
+
+function riskCard(title, r) {
+  const up = r.flag === "elevated";
+  return '<div class="card"><h3>' + title + "</h3>" +
+    '<div class="big">' + pct(r.probability) + '<span class="tag ' + (up ? "warn" : "ok") + '">' + r.flag + "</span></div>" +
+    bar(r.probability, r.threshold) +
+    '<div class="note">Flag threshold ' + pct(r.threshold) + " (90% specificity on validation). " + r.how_reliable.charAt(0).toUpperCase() + r.how_reliable.slice(1) + ".</div>" +
+    why(r.why) + "</div>";
+}
+
+function render(res, blob) {
+  const rec = res.recording, cc = res.cough_check;
+  let h = '<canvas id="wave"></canvas>';
+  if (blob) h += '<audio controls src="' + URL.createObjectURL(blob) + '"></audio>';
+  h += '<div class="cards">';
+  h += '<div class="card"><h3>Cough check</h3><div class="big">' + (cc.is_cough ? "Cough detected" : "No clear cough") + "</div>" +
+    '<div class="note">' + (rec.coughs_found === 0 ? "No cough sound found in the recording. " : "") +
+    "Cough model: " + pct(cc.probability) + "</div>" +
+    (cc.audioset_cough_probability != null ? '<div class="note">Pretrained AudioSet model: cough ' +
+      pct(cc.audioset_cough_probability) + ", speech " + pct(cc.audioset_speech_probability) + "</div>" : "") + "</div>";
+  h += '<div class="card"><h3>Recording</h3><div class="big">' + rec.coughs_found + " cough" + (rec.coughs_found === 1 ? "" : "s") +
+    '</div><div class="note">' + rec.duration_s + " s long, SNR " + rec.snr_db + " dB" +
+    (res.seconds ? ", analysed in " + res.seconds + " s" : "") + "</div></div>";
+  if (res.cough_type) {
+    const ct = res.cough_type;
+    h += '<div class="card"><h3>Cough type</h3><div class="big">' + ct.label + '</div>' + bar(ct.wet_probability, 0.5) +
+      '<div class="note">wet probability ' + pct(ct.wet_probability) + "</div>" + why(ct.why) + "</div>";
+  }
+  if (res.covid_19) h += riskCard("COVID-19 risk", res.covid_19);
+  if (res.respiratory_symptoms) h += riskCard("Respiratory symptoms risk", res.respiratory_symptoms);
+  if (res.true_label) {
+    const t = res.true_label;
+    h += '<div class="card"><h3>True label (test set)</h3><div class="big">' + (t.status || "not given") + "</div>" +
+      '<div class="note">SSL label: ' + (t.status_SSL || "not given") + " &middot; experts' cough type: " +
+      (t.expert_cough_type || "not labelled") + "</div></div>";
+  }
+  h += "</div>";
+  if (res.message) h += '<div class="msg">' + res.message + "</div>";
+  h += '<div class="disclaimer">' + res.disclaimer + "</div>";
+  $("result").innerHTML = h;
+  if (blob) drawWave(blob, rec.cough_segments_s); else drawWave(null, rec.cough_segments_s, rec.duration_s);
+}
+
+async function drawWave(blob, segs, duration) {
+  const c = $("wave");
+  const w = c.width = c.clientWidth * devicePixelRatio, h = c.height = c.clientHeight * devicePixelRatio;
+  const g = c.getContext("2d");
+  let data = null, dur = duration || 1;
+  if (blob) {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const buf = await ctx.decodeAudioData(await blob.arrayBuffer());
+      data = buf.getChannelData(0); dur = buf.duration;
+    } catch (e) { data = null; }
+  }
+  g.clearRect(0, 0, w, h);
+  g.fillStyle = "rgba(47,74,109,0.16)";
+  (segs || []).forEach(([s, e]) => g.fillRect((s / dur) * w, 0, ((e - s) / dur) * w, h));
+  if (data) {
+    const step = Math.max(1, Math.floor(data.length / w));
+    let peak = 1e-6;
+    for (let i = 0; i < data.length; i += 7) peak = Math.max(peak, Math.abs(data[i]));
+    g.fillStyle = "#1d1d1f";
+    for (let x = 0; x < w; x++) {
+      let m = 0;
+      for (let j = x * step; j < Math.min(data.length, (x + 1) * step); j++) m = Math.max(m, Math.abs(data[j]));
+      const y = (m / peak) * (h / 2 - 4);
+      g.fillRect(x, h / 2 - y, 1, Math.max(1, 2 * y));
+    }
+  }
+  g.fillStyle = "#6b6b70";
+  g.font = 11 * devicePixelRatio + "px Arial";
+  g.fillText("shaded = coughs found", 6 * devicePixelRatio, 14 * devicePixelRatio);
+}
+
+// ---------- model performance table
+(async () => {
+  try {
+    const m = await (await fetch("/model-info")).json();
+    const R = m.results, X = R.covid_extra || {};
+    const tasks = [["cough", "Cough vs no cough"], ["wet", "Wet vs dry cough"], ["symptomatic", "Symptoms vs healthy"], ["covid", "COVID-19 vs healthy"]];
+    const f = (r) => (r && r.roc_auc != null ? r.roc_auc.toFixed(3) : "-");
+    let t = '<table><tr><th>Task</th><th class="n">Test recordings</th><th class="n">Handcrafted + LightGBM</th><th class="n">PANNs embedding</th><th class="n">CNN</th><th class="n">Fusion</th></tr>';
+    tasks.forEach(([k, name]) => {
+      const r = R[k]; if (!r) return;
+      t += "<tr><td>" + name + '</td><td class="n">' + r.fusion.n + '</td><td class="n">' + f(r.handcrafted) + '</td><td class="n">' +
+        f(r.panns) + '</td><td class="n">' + f(r.cnn) + '</td><td class="n"><b>' + f(r.fusion) + "</b></td></tr>";
+    });
+    t += "</table>";
+    if (X.metadata_only) t += '<p class="note">COVID-19 for comparison: self-reported symptoms only ' + f(X.metadata_only) +
+      ", audio + symptoms " + f(X.audio_plus_metadata) + ". 0.5 = random, 1.0 = perfect.</p>";
+    $("perf").innerHTML = t;
+  } catch (e) { $("perf").textContent = "model info not available"; }
+})();
+</script>
+</body>
+</html>

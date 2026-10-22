@@ -20,7 +20,7 @@ gender, and labels from four pulmonologists for 2,890 recordings.
 | `cough/panns.py`, `cough/embed.py` | step 2: PANNs CNN14 embeddings (pretrained on AudioSet) |
 | `cough/cnn.py` | multi-task CNN on log-mel spectrograms |
 | `cough/train.py`, `cough/evaluate.py` | step 3: models, fusion, calibration, evaluation, analyses |
-| `cough/api.py` | FastAPI service |
+| `cough/api.py`, `cough/static/index.html` | FastAPI service and web interface |
 | `tests/` | end-to-end tests on synthetic data in the real file format |
 
 ## 1. Data exploration
@@ -207,7 +207,7 @@ python -m pytest                                   # offline tests on synthetic 
 python -m cough.prepare --raw data\raw             # decode + features (~26 min, resumable)
 python -m cough.embed                              # PANNs embeddings (~90 min on CPU, resumable)
 python -m cough.train                              # models + evaluation (~95 min on CPU)
-python -m uvicorn cough.api:app --port 8008        # API -> http://localhost:8008/docs
+python -m uvicorn cough.api:app --port 8008        # interface: http://localhost:8008, API docs: /docs
 ```
 
 - Data: unzip `public_dataset_v3.zip` ([Zenodo](https://zenodo.org/records/7024894) or the same files on
@@ -218,13 +218,20 @@ python -m uvicorn cough.api:app --port 8008        # API -> http://localhost:800
 - `python -m cough.train --cnn resume` continues CNN training from `artifacts\cnn.pt`; `--cnn reuse` skips it.
   Progress is written to `artifacts\train_log.txt`.
 
-## 6. API
+## 6. Interface and API
+
+**Web interface** (http://localhost:8008): record a cough with the microphone (10 s, webm/Opus like the dataset),
+upload a file, or pick a test-set recording. It shows the waveform with the coughs found, the audio, the cough check,
+wet/dry, the COVID-19 and symptom risks with their thresholds, reliability and reasons, the true label for test-set
+recordings, and the test-set performance of every model.
+
 
 | Endpoint | Purpose |
 |---|---|
 | `POST /analyze` | upload a recording (webm, ogg, wav, mp3, m4a) |
 | `GET /examples?status=COVID-19` | test-set recordings (never used in training) with their labels and scores |
 | `GET /examples/{uuid}/analyze` | full analysis of a test-set recording, next to its true labels |
+| `GET /examples/{uuid}/audio` | the audio file of a test-set recording |
 | `GET /model-info` | EDA and all results |
 | `GET /health` | status |
 

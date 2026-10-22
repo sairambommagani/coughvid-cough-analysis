@@ -70,6 +70,8 @@ def test_pipeline_and_api(tmp_path):
         ex = c.get("/examples", params={"n": 2}).json()
         r = c.get(f"/examples/{ex[0]['uuid']}/analyze")
         assert r.status_code == 200 and "cough_check" in r.json()
+        assert c.get(f"/examples/{ex[0]['uuid']}/audio").status_code == 200
+        assert "Cough Analysis" in c.get("/").text
         f = sorted(raw.glob("*.ogg"))[0]
         r = c.post("/analyze", files={"file": (f.name, f.read_bytes(), "audio/ogg")})
         assert r.status_code == 200 and "recording" in r.json()
