@@ -75,4 +75,8 @@ def test_pipeline_and_api(tmp_path):
         f = sorted(raw.glob("*.ogg"))[0]
         r = c.post("/analyze", files={"file": (f.name, f.read_bytes(), "audio/ogg")})
         assert r.status_code == 200 and "recording" in r.json()
-        assert c.post("/analyze", files={"file": ("x.webm", b"not audio", "audio/webm")}).status_code == 422
+        # not audio: stopped by the format check before the models (415); real audio header but cut off: 422
+        assert c.post("/analyze", files={"file": ("x.webm", b"not audio", "audio/webm")}).status_code == 415
+        cut = sorted(raw.glob("*.webm"))[0].read_bytes()[:60]
+        assert c.post("/analyze", files={"file": ("cut.webm", cut, "audio/webm")}).status_code == 422
+        assert r.json()["input"]["format"] == "ogg" and r.json()["model_version"]

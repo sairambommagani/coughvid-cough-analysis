@@ -23,11 +23,15 @@ from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 
 from .audio import load_audio
+from .formats import SUPPORTED, extension_matches, sniff, supported_list
+from .versioning import resolve_artifacts, version_info
 from .cnn import CoughCNN, Normaliser, predict
 from .features import READABLE, analyse
 from .train import apply_fusion
 
-ART = Path(os.environ.get("COUGH_ARTIFACTS", "artifacts"))
+ART_ROOT = Path(os.environ.get("COUGH_ARTIFACTS", "artifacts"))
+ART = resolve_artifacts(ART_ROOT)            # the model version to serve (LATEST, or COUGH_MODEL_VERSION=1.2.0)
+MAX_BYTES = 20_000_000
 PANNS_CKPT = Path(os.environ.get("COUGH_PANNS", "models/Cnn14_mAP=0.431.pth"))
 DISCLAIMER = ("Research prototype trained on crowdsourced recordings with self-reported labels. It is not a medical "
               "device and does not diagnose COVID-19 or any disease; see a doctor or take a test if you are unwell.")
@@ -52,6 +56,7 @@ class Engine:
         if not (art / "config.json").exists():
             raise FileNotFoundError(f"{art}/config.json missing - run `python -m cough.train` first")
         self.cfg = json.loads((art / "config.json").read_text())
+        self.version = version_info(art)
         self.metrics = json.loads((art / "metrics.json").read_text())
         self.models = joblib.load(art / "models.joblib")
         ck = torch.load(art / "cnn.pt", map_location="cpu", weights_only=False)
@@ -121,6 +126,7 @@ class Engine:
         if not res["cough_check"]["is_cough"]:
             res["message"] = "No clear cough found. Please record 2-3 coughs in a quiet place, about 20 cm from the mic."
             res["disclaimer"] = DISCLAIMER
+            res["model_version"] = self.version.get("name")
             return res
         if "wet" in p:
             res["cough_type"] = {"wet_probability": round(p["wet"], 3), "label": "wet" if p["wet"] >= 0.5 else "dry",
@@ -137,6 +143,7 @@ class Engine:
                                           f"(ROC-AUC {self.metrics['results'][task]['fusion'].get('roc_auc', 0):.2f})"),
                          "why": self.why(task, extra["x"])}
         res["disclaimer"] = DISCLAIMER
+        res["model_version"] = self.version.get("name")
         res["seconds"] = round(time.time() - t0, 2)
         return res
 
@@ -167,7 +174,7 @@ def warm_up():
 
 
 UI = Path(__file__).parent / "static" / "index.html"
-MEDIA = {".webm": "audio/webm", ".ogg": "audio/ogg", ".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4"}
+MEDIA = {v[0]: v[1] for v in SUPPORTED.values()}
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
@@ -191,12 +198,36 @@ def example_audio(uuid: str):
 
 @app.get("/health")
 def health():
-    return {"status": "trained" if (ART / "config.json").exists() else "not trained"}
+    return {"status": "trained" if (ART / "config.json").exists() else "not trained",
+            "model_version": version_info(ART).get("name")}
 
 
 @app.get("/model-info")
 def model_info():
-    return eng().metrics
+    e = eng()
+    return {"version": e.version, **e.metrics}
+
+
+@app.get("/formats")
+def formats():
+    """Audio formats accepted by /analyze. Everything is converted to 16 kHz mono PCM before the models."""
+    return {"supported": {k: v[2] for k, v in SUPPORTED.items()}, "max_mb": MAX_BYTES // 1_000_000,
+            "converted_to": "16 kHz mono PCM (float32), peak-normalised"}
+
+
+def check_upload(data: bytes, filename: str | None, content_type: str | None) -> dict:
+    """The format layer in front of the models (see cough/formats.py). Raises the HTTP error to return."""
+    if len(data) == 0:
+        raise HTTPException(400, "empty file")
+    if len(data) > MAX_BYTES:
+        raise HTTPException(413, f"file larger than {MAX_BYTES // 1_000_000} MB")
+    info = sniff(data[:4096])
+    if not info["supported"]:
+        raise HTTPException(415, f"unsupported file: {info['reason']}. Supported audio formats: {supported_list()}")
+    info["filename"] = filename
+    info["declared_type"] = content_type
+    info["extension_matches"] = extension_matches(filename, info["format"])
+    return info
 
 
 @app.get("/examples")
@@ -231,17 +262,23 @@ def analyze_example(uuid: str):
 
 
 @app.post("/analyze")
-async def analyze(file: UploadFile = File(..., description="cough recording: webm, ogg, wav, mp3 or m4a")):
-    suffix = Path(file.filename or "x.webm").suffix or ".webm"
+async def analyze(file: UploadFile = File(..., description="cough recording: webm, ogg, mp4, m4a, wav, mp3, aac, "
+                                                              "flac, 3gp, amr (see GET /formats)")):
     data = await file.read()
-    if len(data) > 20_000_000:
-        raise HTTPException(413, "file larger than 20 MB")
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+    info = check_upload(data, file.filename, file.content_type)          # 1. format check before the models
+    e = eng()
+    # 2. saved with the extension of the DETECTED format (a renamed file decodes correctly), then decoded by
+    #    ffmpeg to 16 kHz mono inside analyse_file
+    with tempfile.NamedTemporaryFile(suffix=info["extension"], delete=False) as tmp:
         tmp.write(data)
         path = tmp.name
     try:
-        return {"file": file.filename, **eng().analyse_file(path)}
-    except ValueError as ex:
-        raise HTTPException(422, str(ex))
+        res = e.analyse_file(path)
+    except ValueError as ex:                                             # looks like audio but does not decode
+        raise HTTPException(422, f"could not decode the {info['format']} file (corrupted or truncated?): {ex}")
     finally:
         os.unlink(path)
+    info.pop("supported", None)
+    info.pop("reason", None)
+    info["converted_to"] = "16 kHz mono PCM"
+    return {"file": file.filename, "input": info, **res}

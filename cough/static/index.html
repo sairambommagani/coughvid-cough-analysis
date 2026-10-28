@@ -88,8 +88,8 @@
     </div>
 
     <div id="t-up" class="tab">
-      <p class="hint">webm, ogg, wav, mp3 or m4a.</p>
-      <div class="row"><input type="file" id="file" accept=".webm,.ogg,.wav,.mp3,.m4a,audio/*"></div>
+      <p class="hint">webm, ogg, mp4, m4a, wav, mp3, aac, flac, 3gp or amr. The real format is checked on the server.</p>
+      <div class="row"><input type="file" id="file" accept=".webm,.ogg,.opus,.mp4,.m4a,.wav,.mp3,.aac,.flac,.3gp,.amr,audio/*"></div>
       <div class="row"><button class="btn ghost" id="upGo" disabled>Analyse file</button></div>
     </div>
 
@@ -128,25 +128,52 @@ document.querySelectorAll(".tabs button").forEach((b) => b.onclick = () => {
   document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("on", t.id === b.dataset.tab));
 });
 
-// ---------- recording (MediaRecorder -> webm/opus, the same format as COUGHVID)
-let recorder = null, chunks = [], recBlob = null, timer = null;
+// ---------- recording
+// Opus first (WebM/Opus in Chrome, Edge, Firefox; Ogg/Opus where only that exists): the same codec as COUGHVID.
+// If the browser cannot record Opus (Safari, iPhone), fall back to MP4/AAC. The file name gets the extension of
+// the format actually recorded, and the server checks the real format again before the models.
+const REC_FORMATS = [
+  { mime: "audio/webm;codecs=opus", ext: "webm", label: "WebM / Opus" },
+  { mime: "audio/ogg;codecs=opus", ext: "ogg", label: "Ogg / Opus" },
+  { mime: "audio/mp4;codecs=mp4a.40.2", ext: "mp4", label: "MP4 / AAC" },
+  { mime: "audio/mp4", ext: "mp4", label: "MP4" },
+];
+function pickFormat() {
+  if (typeof MediaRecorder === "undefined") return null;
+  for (const f of REC_FORMATS) if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(f.mime)) return f;
+  return { mime: "", ext: "webm", label: "browser default" };             // let the browser choose
+}
+function formatOf(mimeType, fallback) {                                    // what was really recorded
+  const m = (mimeType || "").toLowerCase();
+  if (m.includes("webm")) return { ext: "webm", label: "WebM" + (m.includes("opus") ? " / Opus" : "") };
+  if (m.includes("ogg")) return { ext: "ogg", label: "Ogg" + (m.includes("opus") ? " / Opus" : "") };
+  if (m.includes("mp4") || m.includes("aac")) return { ext: "mp4", label: "MP4 / AAC" };
+  return fallback;
+}
+let recorder = null, chunks = [], recBlob = null, recName = "recording.webm", timer = null;
 $("recBtn").onclick = async () => {
   if (recorder && recorder.state === "recording") { recorder.stop(); return; }
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const fmt = pickFormat();
+    if (!fmt) throw new Error("this browser cannot record audio (MediaRecorder missing) - use Upload instead");
+    const stream = await navigator.mediaDevices.getUserMedia(
+      { audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
     chunks = [];
-    recorder = new MediaRecorder(stream);
-    recorder.ondataavailable = (e) => chunks.push(e.data);
+    recorder = fmt.mime ? new MediaRecorder(stream, { mimeType: fmt.mime, audioBitsPerSecond: 64000 })
+                        : new MediaRecorder(stream);
+    recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
     recorder.onstop = () => {
       clearInterval(timer);
       stream.getTracks().forEach((t) => t.stop());
-      recBlob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+      const real = formatOf(recorder.mimeType || fmt.mime, fmt);
+      recBlob = new Blob(chunks, { type: recorder.mimeType || fmt.mime || "audio/webm" });
+      recName = "recording." + real.ext;
       $("recBtn").textContent = "Record again";
-      $("recState").textContent = "recorded " + (recBlob.size / 1024).toFixed(0) + " KB";
+      $("recState").textContent = "recorded " + (recBlob.size / 1024).toFixed(0) + " KB, " + real.label;
       $("recGo").disabled = false;
       showAudio(recBlob);
     };
-    recorder.start();
+    recorder.start(250);                                                  // chunks every 250 ms: nothing lost on stop
     let t = 0;
     $("recBtn").textContent = "Stop";
     $("recState").innerHTML = '<span class="rec-dot"></span> recording 0 s';
@@ -160,7 +187,7 @@ $("recBtn").onclick = async () => {
     $("recState").textContent = "microphone not available: " + e.message;
   }
 };
-$("recGo").onclick = () => recBlob && analyseBlob(recBlob, "recording.webm");
+$("recGo").onclick = () => recBlob && analyseBlob(recBlob, recName);
 
 // ---------- upload
 $("file").onchange = () => { $("upGo").disabled = !$("file").files.length; };
@@ -249,7 +276,11 @@ function render(res, blob) {
       pct(cc.audioset_cough_probability) + ", speech " + pct(cc.audioset_speech_probability) + "</div>" : "") + "</div>";
   h += '<div class="card"><h3>Recording</h3><div class="big">' + rec.coughs_found + " cough" + (rec.coughs_found === 1 ? "" : "s") +
     '</div><div class="note">' + rec.duration_s + " s long, SNR " + rec.snr_db + " dB" +
-    (res.seconds ? ", analysed in " + res.seconds + " s" : "") + "</div></div>";
+    (res.seconds ? ", analysed in " + res.seconds + " s" : "") + "</div>" +
+    (res.input ? '<div class="note">Input: ' + res.input.format + (res.input.codec ? " / " + res.input.codec : "") +
+      " (checked on the server), converted to " + res.input.converted_to +
+      (res.input.extension_matches === false ? ". Note: the file name said otherwise." : "") + "</div>" : "") +
+    (res.model_version ? '<div class="note">Model ' + res.model_version + "</div>" : "") + "</div>";
   if (res.cough_type) {
     const ct = res.cough_type;
     h += '<div class="card"><h3>Cough type</h3><div class="big">' + ct.label + '</div>' + bar(ct.wet_probability, 0.5) +

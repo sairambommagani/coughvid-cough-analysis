@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import shutil
 import time
 import warnings
 from pathlib import Path
@@ -364,11 +365,29 @@ def main():
     ap.add_argument("--epochs", type=int, default=12)
     ap.add_argument("--fast", action="store_true")
     ap.add_argument("--cnn", choices=["new", "resume", "reuse"], default="new",
-                    help="new: train the CNN from scratch; resume: continue from artifacts/cnn.pt; reuse: no CNN training")
+                    help="new: train the CNN from scratch; resume: continue from the current version's cnn.pt; "
+                         "reuse: no CNN training")
+    ap.add_argument("--bump", choices=["major", "minor", "patch"], default="minor",
+                    help="semantic version step for this training run (see cough/versioning.py): major = new "
+                         "architecture/features, minor = retrained (default), patch = fix")
+    ap.add_argument("--version", default=None, help="explicit version MAJOR.MINOR.PATCH instead of --bump")
+    ap.add_argument("--notes", default="", help="what changed in this version (stored in the model card)")
     a = ap.parse_args()
-    log = file_logger(Path(a.artifacts) / "train_log.txt")
-    log(f"--- {time.strftime('%Y-%m-%d %H:%M')} cough.train --cnn {a.cnn} --epochs {a.epochs}")
-    out = run(Path(a.cache), Path(a.artifacts), a.epochs, a.fast, a.cnn, log=log)
+    from . import versioning
+    root = Path(a.artifacts)
+    prev_dir = versioning.previous_dir(root)
+    parent = versioning.version_info(prev_dir).get("version") if prev_dir else None
+    version, vdir = versioning.new_version(root, a.bump, a.version)
+    if prev_dir is not None and a.cnn in ("resume", "reuse"):          # start from the current version's CNN
+        for f in ("cnn.pt", "config.json"):
+            if (prev_dir / f).exists():
+                shutil.copy2(prev_dir / f, vdir / f)
+    log = file_logger(vdir / "train_log.txt")
+    log(f"--- {time.strftime('%Y-%m-%d %H:%M')} cough.train {vdir.name} --cnn {a.cnn} --epochs {a.epochs}")
+    out = run(Path(a.cache), vdir, a.epochs, a.fast, a.cnn, log=log)
+    card = versioning.register(root, vdir, version, "explicit" if a.version else a.bump, Path(a.cache),
+                               {"epochs": a.epochs, "fast": a.fast, "cnn": a.cnn}, a.notes, parent)
+    log(f"registered {card['name']} (parent {parent}); LATEST -> {card['name']}")
     print(json.dumps({t: {m: r.get("roc_auc") for m, r in res.items() if isinstance(r, dict) and "roc_auc" in r}
                       for t, res in out["results"].items() if t != "covid_extra"}, indent=2))
 

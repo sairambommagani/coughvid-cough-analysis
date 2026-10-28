@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 
 SR = 16_000
-AUDIO_EXT = (".webm", ".ogg", ".wav", ".mp3", ".m4a", ".flac")
+AUDIO_EXT = (".webm", ".ogg", ".wav", ".mp3", ".m4a", ".mp4", ".aac", ".flac", ".3gp", ".amr", ".aiff", ".opus")
 
 
 def ffmpeg_exe() -> str | None:

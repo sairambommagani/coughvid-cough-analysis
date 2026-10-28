@@ -20,8 +20,10 @@ gender, and labels from four pulmonologists for 2,890 recordings.
 | `cough/panns.py`, `cough/embed.py` | step 2: PANNs CNN14 embeddings (pretrained on AudioSet) |
 | `cough/cnn.py` | multi-task CNN on log-mel spectrograms |
 | `cough/train.py`, `cough/evaluate.py` | step 3: models, fusion, calibration, evaluation, analyses |
-| `cough/api.py`, `cough/static/index.html` | FastAPI service and web interface |
-| `tests/` | end-to-end tests on synthetic data in the real file format |
+| `cough/formats.py` | input format check in front of the models: detects the real format, rejects non-audio |
+| `cough/versioning.py` | model versions (semantic versioning), model cards, registry, rollback |
+| `cough/api.py`, `cough/static/index.html` | FastAPI service and web interface (recorder: Opus, MP4 fallback) |
+| `tests/` | end-to-end tests on synthetic data in the real file format, format matrix tests |
 
 ## 1. Data exploration
 
@@ -206,7 +208,7 @@ pip install -r requirements.txt
 python -m pytest                                   # offline tests on synthetic data
 python -m cough.prepare --raw data\raw             # decode + features (~26 min, resumable)
 python -m cough.embed                              # PANNs embeddings (~90 min on CPU, resumable)
-python -m cough.train                              # models + evaluation (~95 min on CPU)
+python -m cough.train --bump minor --notes "..."   # models + evaluation (~95 min on CPU) -> new model version
 python -m uvicorn cough.api:app --port 8008        # interface: http://localhost:8008, API docs: /docs
 ```
 
@@ -215,12 +217,14 @@ python -m uvicorn cough.api:app --port 8008        # interface: http://localhost
 - PANNs checkpoint: `Cnn14_mAP=0.431.pth` from [Zenodo record 3987831](https://zenodo.org/record/3987831) into
   `models\`.
 - ffmpeg is taken from the PATH or from the `imageio-ffmpeg` package (no separate install).
-- `python -m cough.train --cnn resume` continues CNN training from `artifacts\cnn.pt`; `--cnn reuse` skips it.
-  Progress is written to `artifacts\train_log.txt`.
+- `python -m cough.train --cnn resume` continues CNN training from the current version's `cnn.pt`; `--cnn reuse`
+  skips it. Progress is written to `train_log.txt` inside the new version folder.
+- Test data in every format: `python scripts/make_synthetic.py --out data\synthetic_formats --n 60 --formats all`.
 
 ## 6. Interface and API
 
-**Web interface** (http://localhost:8008): record a cough with the microphone (10 s, webm/Opus like the dataset),
+**Web interface** (http://localhost:8008): record a cough with the microphone (10 s; Opus where the browser supports
+it, i.e. WebM/Opus in Chrome, Edge and Firefox, otherwise MP4/AAC, e.g. Safari and iPhone),
 upload a file, or pick a test-set recording. It shows the waveform with the coughs found, the audio, the cough check,
 wet/dry, the COVID-19 and symptom risks with their thresholds, reliability and reasons, the true label for test-set
 recordings, and the test-set performance of every model.
@@ -228,12 +232,56 @@ recordings, and the test-set performance of every model.
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /analyze` | upload a recording (webm, ogg, wav, mp3, m4a) |
+| `POST /analyze` | upload a recording (webm, ogg, mp4, m4a, wav, mp3, aac, flac, 3gp, amr) |
+| `GET /formats` | accepted formats |
 | `GET /examples?status=COVID-19` | test-set recordings (never used in training) with their labels and scores |
 | `GET /examples/{uuid}/analyze` | full analysis of a test-set recording, next to its true labels |
 | `GET /examples/{uuid}/audio` | the audio file of a test-set recording |
-| `GET /model-info` | EDA and all results |
-| `GET /health` | status |
+| `GET /model-info` | model version card, EDA and all results |
+| `GET /health` | status and model version |
+
+### Input formats
+
+Phones, browsers and regions record in different formats. Before a file reaches the models, `cough/formats.py`
+checks it:
+
+1. **Detect** the real format from the first bytes of the file (magic numbers), not from the file name or the
+   Content-Type, which are often wrong: an MP3 renamed to `.webm` is still detected as MP3.
+2. **Decide:** a supported audio format continues. Anything else (image, PDF, zip, text, unknown) gets
+   `415 Unsupported Media Type` with the list of accepted formats. An empty file gets `400`, a file over 20 MB `413`,
+   and a file that looks like audio but does not decode (truncated, corrupted) `422`.
+3. **Convert** every format with ffmpeg to the one input the models were trained on: 16 kHz mono PCM, peak-normalised.
+
+The response says what was received: `"input": {"format": "mp4", "codec": "aac", "extension_matches": true,
+"converted_to": "16 kHz mono PCM"}`.
+
+Format matrix tests (`tests/test_formats.py`): the synthetic generator writes the same cough recording in 10
+formats (WebM/Opus, Ogg/Opus, Ogg/Vorbis, MP4/AAC, M4A/AAC, AAC, MP3, WAV 16-bit, WAV 8 kHz telephone quality,
+FLAC). For every format, the tests check detection, decoding to the same model input (same length, the same
+coughs found), and `POST /analyze` with the right file name, a wrong file name and no file name. Non-audio files,
+empty, oversized and truncated files are checked to be rejected with the right status code.
+
+### Model versions
+
+Every training run creates a new version, named with semantic versioning:
+
+| Part | When | Example |
+|---|---|---|
+| MAJOR | new architecture, new input features, or a change to the API output | 1.4.2 -> 2.0.0 |
+| MINOR | retrained: new data or hyperparameters, same architecture | 1.4.2 -> 1.5.0 |
+| PATCH | fix that does not change what the model learned (threshold, calibration, bug) | 1.4.2 -> 1.4.3 |
+
+Name: `<project>_v<MAJOR.MINOR.PATCH>_<model type>_<YYYYMMDD>`, e.g. `artifacts\coughvid_v1.1.0_fusion_20261028\`.
+Each version folder holds the models and a model card `version.json`: version, parent version, date, git commit,
+data fingerprint, training arguments, notes, test ROC-AUC. `artifacts\registry.json` lists every version, and
+`artifacts\LATEST` names the one the API serves.
+
+```powershell
+python -m cough.versioning --adopt-legacy            # existing flat artifacts\ -> coughvid_v1.0.0_fusion_<date>
+python -m cough.train --bump minor --notes "retrained on ..."
+python -m cough.versioning --list                    # all versions, * = served
+python -m cough.versioning --use 1.0.0               # rollback: serve another version
+```
 
 The response contains: the cough segments found and the SNR; the cough check (model probability and the AudioSet
 "Cough" probability); wet/dry; COVID-19 and respiratory-symptom probabilities with a flag at the 90%-specificity
