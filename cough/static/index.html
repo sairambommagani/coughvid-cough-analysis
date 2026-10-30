@@ -66,7 +66,13 @@
 <body>
 <header>
   <h1>Cough Analysis</h1>
-  <p>Cough check, wet/dry cough type, COVID-19 and respiratory-symptom risk from a cough recording (COUGHVID v3 models).</p>
+  <p id="iu">Detects whether a recording contains coughs; optionally estimates wet vs dry cough type for clinician review. Does not diagnose COVID-19 or any other disease.</p>
+  <div class="msg" id="regstatus" style="margin-top:8px">Not a medical device. Investigational software; not cleared or approved by any regulator.</div>
+  <div class="row" style="margin-top:8px">
+    <label class="note">User ID <input id="uid" value="demo-user" size="14"></label>
+    <label class="note">Organisation ID <input id="oid" value="demo-org" size="14"></label>
+    <span class="note">(opaque account ids, set by the login in deployment; recorded in the audit trail)</span>
+  </div>
 </header>
 
 <main>
@@ -108,7 +114,7 @@
 
   <section class="panel">
     <h2>Result</h2>
-    <div id="result"><div class="empty">Record, upload or pick a test-set recording to see the analysis.</div></div>
+    <div id="result"><div class="empty" id="emptyMsg">Record or upload a cough recording to see the analysis.</div></div>
   </section>
 
   <section class="panel full">
@@ -222,7 +228,8 @@ async function analyseBlob(blob, name) {
   busy("Analysing...");
   const fd = new FormData();
   fd.append("file", blob, name);
-  const r = await fetch("/analyze", { method: "POST", body: fd });
+  const r = await fetch("/analyze", { method: "POST", body: fd,
+    headers: { "X-User-Id": $("uid").value.trim(), "X-Org-Id": $("oid").value.trim() } });
   const res = await r.json();
   if (!r.ok) return error(res);
   render(res, blob);
@@ -283,8 +290,15 @@ function render(res, blob) {
     (res.model_version ? '<div class="note">Model ' + res.model_version + "</div>" : "") + "</div>";
   if (res.cough_type) {
     const ct = res.cough_type;
-    h += '<div class="card"><h3>Cough type</h3><div class="big">' + ct.label + '</div>' + bar(ct.wet_probability, 0.5) +
-      '<div class="note">wet probability ' + pct(ct.wet_probability) + "</div>" + why(ct.why) + "</div>";
+    if (ct.wet_probability == null) {
+      h += '<div class="card"><h3>Cough type (for clinician review)</h3><div class="big">' + ct.label + "</div>" +
+        '<div class="note">' + ct.reason + ". " + ct.message + "</div></div>";
+    } else {
+      h += '<div class="card"><h3>Cough type (for clinician review)</h3><div class="big">' + ct.label + '</div>' +
+        bar(ct.wet_probability, 0.5) + '<div class="note">wet probability ' + pct(ct.wet_probability) +
+        "; " + pct(ct.indeterminate_band[0]) + "-" + pct(ct.indeterminate_band[1]) + " is reported as indeterminate. " +
+        ct.for + "</div>" + why(ct.why) + "</div>";
+    }
   }
   if (res.covid_19) h += riskCard("COVID-19 risk", res.covid_19);
   if (res.respiratory_symptoms) h += riskCard("Respiratory symptoms risk", res.respiratory_symptoms);
@@ -296,7 +310,8 @@ function render(res, blob) {
   }
   h += "</div>";
   if (res.message) h += '<div class="msg">' + res.message + "</div>";
-  h += '<div class="disclaimer">' + res.disclaimer + "</div>";
+  h += '<div class="disclaimer">' + res.disclaimer +
+    (res.request_id ? "<br>Request id " + res.request_id + " (audit trail). " + (res.data_retention || "") : "") + "</div>";
   $("result").innerHTML = h;
   if (blob) drawWave(blob, rec.cough_segments_s); else drawWave(null, rec.cough_segments_s, rec.duration_s);
 }
@@ -332,6 +347,19 @@ async function drawWave(blob, segs, duration) {
   g.font = 11 * devicePixelRatio + "px Arial";
   g.fillText("shaded = coughs found", 6 * devicePixelRatio, 14 * devicePixelRatio);
 }
+
+// ---------- intended use / mode: research-only parts are hidden in production
+(async () => {
+  try {
+    const iu = await (await fetch("/intended-use")).json();
+    $("regstatus").textContent = iu.regulatory_status;
+    if (iu.mode === "production") {
+      const b = document.querySelector('[data-tab="t-ex"]'); if (b) b.style.display = "none";
+    } else {
+      const m = $("emptyMsg"); if (m) m.textContent = "Record, upload or pick a test-set recording to see the analysis (research mode).";
+    }
+  } catch (e) {}
+})();
 
 // ---------- model performance table
 (async () => {

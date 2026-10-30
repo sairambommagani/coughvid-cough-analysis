@@ -5,7 +5,17 @@ of COVID-19 and of respiratory symptoms, with the reasons behind each score. Eve
 it never saw, with confidence intervals, calibration and subgroup results, and the limits of what a cough can tell
 are measured, not assumed.
 
-**Research prototype. Not a medical device; it does not diagnose COVID-19 or any disease.**
+**Not a medical device.** Investigational software developed with IEC 62304 Class B intent for the Indian market
+(CDSCO); not licensed by CDSCO or cleared by any other regulator.
+
+**Intended use (production):** detects whether a recording contains coughs; optionally estimates wet vs dry cough
+type for clinician review. Does not diagnose COVID-19 or any other disease. The COVID-19 and respiratory-symptom
+models below are research results only: in production they are not computed or shown (see why in
+[docs/regulatory/05](docs/regulatory/05_risk_management_file.md)).
+
+Regulatory documentation (intended use, development plan, requirements, architecture, risk file, SOUP list, test
+protocol, traceability, audit and data protection, legal / DPDP, release and change control):
+[docs/regulatory/](docs/regulatory/00_index.md).
 
 Data: [COUGHVID v3](https://zenodo.org/records/7024894) (Orlandic, Teijeiro, Atienza, EPFL; CC BY 4.0), 34,434
 recordings collected through a web app from April 2020 to October 2021, with self-reported status, symptoms, age and
@@ -20,6 +30,9 @@ gender, and labels from four pulmonologists for 2,890 recordings.
 | `cough/panns.py`, `cough/embed.py` | step 2: PANNs CNN14 embeddings (pretrained on AudioSet) |
 | `cough/cnn.py` | multi-task CNN on log-mel spectrograms |
 | `cough/train.py`, `cough/evaluate.py` | step 3: models, fusion, calibration, evaluation, analyses |
+| `cough/samd.py` | intended use, production / research mode, output gating, quality gate, labelling, forbidden inputs |
+| `cough/audit.py` | append-only, hash-chained audit trail of every request; verify / find / seal |
+| `cough/phi.py` | personal data: hash + features only by default, audio retention and purge, erasure |
 | `cough/formats.py` | input format check in front of the models: detects the real format, rejects non-audio |
 | `cough/versioning.py` | model versions (semantic versioning), model cards, registry, rollback |
 | `cough/api.py`, `cough/static/index.html` | FastAPI service and web interface (recorder: Opus, MP4 fallback) |
@@ -209,7 +222,11 @@ python -m pytest                                   # offline tests on synthetic 
 python -m cough.prepare --raw data\raw             # decode + features (~26 min, resumable)
 python -m cough.embed                              # PANNs embeddings (~90 min on CPU, resumable)
 python -m cough.train --bump minor --notes "..."   # models + evaluation (~95 min on CPU) -> new model version
-python -m uvicorn cough.api:app --port 8008        # interface: http://localhost:8008, API docs: /docs
+python -m uvicorn cough.api:app --port 8008        # production mode: http://localhost:8008, API docs: /docs
+$env:COUGH_MODE="research"; python -m uvicorn cough.api:app --port 8008   # research mode: all outputs, test set
+python -m cough.audit --verify                     # check the audit trail
+python -m cough.phi --purge                        # delete audio past its retention (daily)
+python scripts/soup_versions.py                    # exact SOUP versions -> docs + requirements.lock.txt
 ```
 
 - Data: unzip `public_dataset_v3.zip` ([Zenodo](https://zenodo.org/records/7024894) or the same files on
@@ -226,7 +243,7 @@ python -m uvicorn cough.api:app --port 8008        # interface: http://localhost
 **Web interface** (http://localhost:8008): record a cough with the microphone (10 s; Opus where the browser supports
 it, i.e. WebM/Opus in Chrome, Edge and Firefox, otherwise MP4/AAC, e.g. Safari and iPhone),
 upload a file, or pick a test-set recording. It shows the waveform with the coughs found, the audio, the cough check,
-wet/dry, the COVID-19 and symptom risks with their thresholds, reliability and reasons, the true label for test-set
+wet/dry (for clinician review), in research mode also the COVID-19 and symptom risks with their thresholds, reliability and reasons, the true label for test-set
 recordings, and the test-set performance of every model.
 
 

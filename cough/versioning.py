@@ -96,18 +96,62 @@ def git_dirty() -> bool | None:
         return None
 
 
+def file_sha256(p: Path) -> str:
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def data_fingerprint(cache: Path) -> dict:
-    """Which data the version was trained on: size and hash of the cached metadata."""
-    p = Path(cache) / "meta.parquet"
-    if not p.exists():
-        return {}
-    h = hashlib.sha256(p.read_bytes()).hexdigest()[:12]
+    """Which data the version was trained on: SHA-256 of the cached metadata (labels, split) and features,
+    number of recordings and the train/val/test split sizes."""
+    cache = Path(cache)
+    out = {"cache": str(cache)}
+    for name in ("meta.parquet", "features.parquet", "eda.json"):
+        if (cache / name).exists():
+            out[f"{name}_sha256"] = file_sha256(cache / name)
     try:
         import pandas as pd
-        n = int(len(pd.read_parquet(p, columns=["uuid"])))
+        m = pd.read_parquet(cache / "meta.parquet", columns=["uuid", "split"])
+        out["recordings"] = int(len(m))
+        out["split"] = {k: int(v) for k, v in m["split"].value_counts().items()}
     except Exception:
-        n = None
-    return {"cache": str(cache), "meta_sha256": h, "recordings": n}
+        pass
+    out["training_data_sha256"] = hashlib.sha256(
+        "".join(out.get(f"{n}_sha256", "") for n in ("meta.parquet", "features.parquet")).encode()).hexdigest()
+    return out
+
+
+def artifact_hashes(vdir: Path) -> dict:
+    return {p.name: file_sha256(p) for p in sorted(Path(vdir).iterdir())
+            if p.is_file() and p.name not in ("version.json", "train_log.txt")}
+
+
+def lock_files(vdir: Path) -> None:
+    """No silent overwrite: a registered version's files are made read-only."""
+    import stat
+    for p in Path(vdir).rglob("*"):
+        if p.is_file():
+            p.chmod(stat.S_IREAD | stat.S_IRGRP | stat.S_IROTH)
+
+
+def verify_integrity(vdir: Path) -> list[str]:
+    """Files whose SHA-256 differs from the model card (empty list = intact). Used by the API at start-up."""
+    card = Path(vdir) / "version.json"
+    if not card.exists():
+        return ["version.json missing"]
+    want = json.loads(card.read_text()).get("file_sha256", {})
+    if not want:
+        return ["model card has no file hashes"]
+    bad = [n for n, h in want.items() if not (Path(vdir) / n).exists() or file_sha256(Path(vdir) / n) != h]
+    return bad
+
+
+def card_sha256(vdir: Path) -> str | None:
+    p = Path(vdir) / "version.json"
+    return file_sha256(p) if p.exists() else None
 
 
 def new_version(root: Path, part: str = "minor", version: str | None = None) -> tuple[str, Path]:
@@ -140,9 +184,12 @@ def register(root: Path, vdir: Path, version: str, part: str, cache: Path | None
             "parent": parent, "created": time.strftime("%Y-%m-%d %H:%M:%S"), "git_commit": git_commit(),
             "git_uncommitted_changes": git_dirty(),
             "data": data_fingerprint(cache) if cache else {}, "training_args": args, "notes": notes,
-            "test_roc_auc": summary, "python": platform.python_version(),
-            "files": sorted(p.name for p in vdir.iterdir() if p.is_file())}
+            "test_roc_auc": summary, "python": platform.python_version(), "soup": soup_versions(),
+            "metrics_file": "metrics.json", "file_sha256": artifact_hashes(vdir)}
+    if (vdir / "version.json").exists():
+        raise FileExistsError(f"{vdir.name} is already registered - versions are never overwritten")
     (vdir / "version.json").write_text(json.dumps(card, indent=2))
+    lock_files(vdir)
     reg = load_registry(root)
     reg["versions"] = [v for v in reg["versions"] if v["version"] != version] + [
         {k: card[k] for k in ("name", "version", "bump", "parent", "created", "git_commit", "notes", "test_roc_auc")}]
@@ -150,6 +197,27 @@ def register(root: Path, vdir: Path, version: str, part: str, cache: Path | None
     save_registry(root, reg)
     (root / "LATEST").write_text(vdir.name)
     return card
+
+
+def soup_versions() -> dict:
+    """Versions of the third-party software (SOUP) the model was trained with."""
+    from importlib import metadata
+    out = {}
+    for pkg in ("numpy", "pandas", "scipy", "scikit-learn", "lightgbm", "torch", "librosa", "soundfile", "fastapi",
+                "joblib", "imageio-ffmpeg"):
+        try:
+            out[pkg] = metadata.version(pkg)
+        except Exception:
+            out[pkg] = None
+    try:
+        from .audio import ffmpeg_exe
+        exe = ffmpeg_exe()
+        if exe:
+            r = subprocess.run([exe, "-version"], capture_output=True, text=True, timeout=10)
+            out["ffmpeg"] = r.stdout.split("\n")[0].replace("ffmpeg version ", "").split(" ")[0]
+    except Exception:
+        out["ffmpeg"] = None
+    return out
 
 
 def resolve_artifacts(root: Path) -> Path:
@@ -181,6 +249,28 @@ def previous_dir(root: Path) -> Path | None:
     return d if (d / "config.json").exists() else None
 
 
+def add_missing_hashes(root: Path, version: str) -> dict:
+    """One-time migration for versions registered before file hashes existed: adds file_sha256 to the model card.
+    Refused if the card already has hashes (a registered card is never rewritten); the migration is recorded in
+    the card (hashes_added) so it is visible that the hashes were taken after registration."""
+    import stat
+    hits = [v["name"] for v in load_registry(root)["versions"] if v["version"] == version.lstrip("v")]
+    if not hits:
+        raise ValueError(f"version {version} not found")
+    vdir = Path(root) / hits[0]
+    card_p = vdir / "version.json"
+    card = json.loads(card_p.read_text())
+    if card.get("file_sha256"):
+        raise FileExistsError(f"{vdir.name} already has file hashes; model cards are never rewritten")
+    card["file_sha256"] = artifact_hashes(vdir)
+    card["hashes_added"] = {"at": time.strftime("%Y-%m-%d %H:%M:%S"), "git_commit": git_commit(),
+                            "note": "file hashes added after registration (version registered before integrity checks)"}
+    card_p.chmod(stat.S_IREAD | stat.S_IWRITE)
+    card_p.write_text(json.dumps(card, indent=2))
+    lock_files(vdir)
+    return card
+
+
 def adopt_legacy(root: Path, version: str = "1.0.0", cache: Path | None = None) -> dict:
     """Move a flat artifacts/ folder (trained before versioning) into its first version folder."""
     root = Path(root)
@@ -203,8 +293,14 @@ def main():
     ap.add_argument("--adopt-legacy", action="store_true", help="move flat artifacts/ into coughvid_v1.0.0_...")
     ap.add_argument("--cache", default="data/cache")
     ap.add_argument("--use", help="serve this version: point LATEST at it (rollback)")
+    ap.add_argument("--add-hashes", metavar="VERSION",
+                    help="one-time: add file hashes to a version registered before integrity checks existed")
     a = ap.parse_args()
     root = Path(a.artifacts)
+    if a.add_hashes:
+        card = add_missing_hashes(root, a.add_hashes)
+        print(f"hashes added to {card['name']}: {len(card['file_sha256'])} files")
+        print("integrity:", verify_integrity(root / card["name"]) or "verified")
     if a.adopt_legacy:
         card = adopt_legacy(root, cache=Path(a.cache))
         print(f"adopted -> {card['name']}")

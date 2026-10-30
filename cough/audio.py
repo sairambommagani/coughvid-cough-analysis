@@ -18,6 +18,7 @@ from pathlib import Path
 import numpy as np
 
 SR = 16_000
+FFMPEG_TIMEOUT_S = 30
 AUDIO_EXT = (".webm", ".ogg", ".wav", ".mp3", ".m4a", ".mp4", ".aac", ".flac", ".3gp", ".amr", ".aiff", ".opus")
 
 
@@ -44,7 +45,10 @@ def load_audio(path: str | Path, sr: int = SR, max_seconds: float = 12.0) -> np.
     if exe:
         cmd = [exe, "-nostdin", "-v", "error", "-i", path, "-t", str(max_seconds), "-ac", "1", "-ar", str(sr),
                "-f", "f32le", "-"]
-        out = subprocess.run(cmd, capture_output=True, check=False)
+        try:                                      # RC-09: a malformed file must not hang the service
+            out = subprocess.run(cmd, capture_output=True, check=False, timeout=FFMPEG_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            raise ValueError(f"decoding {Path(path).name} took longer than {FFMPEG_TIMEOUT_S} s")
         if out.returncode != 0:
             raise ValueError(f"ffmpeg could not decode {Path(path).name}: {out.stderr.decode(errors='ignore')[:200]}")
         x = np.frombuffer(out.stdout, dtype=np.float32).copy()

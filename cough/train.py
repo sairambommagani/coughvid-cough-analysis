@@ -127,6 +127,9 @@ def run(cache: Path, art: Path, epochs: int = 15, fast: bool = False, cnn_mode: 
     "reuse" loads artifacts/cnn.pt without training."""
     t0 = time.time()
     art.mkdir(parents=True, exist_ok=True)
+    if (art / "version.json").exists() or (art / "models.joblib").exists():   # no silent overwrite
+        raise FileExistsError(f"{art} already holds a trained model; train into a new version "
+                              f"(python -m cough.train --bump minor) instead of overwriting it")
     meta = pd.read_parquet(cache / "meta.parquet")
     feats = pd.read_parquet(cache / "features.parquet")
     mel = np.load(cache / "logmel.npy", mmap_mode="r")
@@ -381,7 +384,7 @@ def main():
     if prev_dir is not None and a.cnn in ("resume", "reuse"):          # start from the current version's CNN
         for f in ("cnn.pt", "config.json"):
             if (prev_dir / f).exists():
-                shutil.copy2(prev_dir / f, vdir / f)
+                shutil.copyfile(prev_dir / f, vdir / f)          # copy without the read-only flag of the parent
     log = file_logger(vdir / "train_log.txt")
     log(f"--- {time.strftime('%Y-%m-%d %H:%M')} cough.train {vdir.name} --cnn {a.cnn} --epochs {a.epochs}")
     out = run(Path(a.cache), vdir, a.epochs, a.fast, a.cnn, log=log)

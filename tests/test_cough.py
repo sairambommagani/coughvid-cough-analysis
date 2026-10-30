@@ -62,6 +62,9 @@ def test_pipeline_and_api(tmp_path):
     assert out["results"]["cough"]["fusion"]["roc_auc"] > 0.8          # non-coughs are easy to tell apart
 
     os.environ["COUGH_ARTIFACTS"] = str(art)
+    os.environ["COUGH_MODE"] = "research"                  # research mode: all outputs and the test-set browser
+    os.environ["COUGH_AUDIT_DIR"] = str(tmp_path / "audit")
+    os.environ["COUGH_DATA_DIR"] = str(tmp_path / "store")
     import importlib
     import cough.api as api
     importlib.reload(api)
@@ -80,3 +83,55 @@ def test_pipeline_and_api(tmp_path):
         cut = sorted(raw.glob("*.webm"))[0].read_bytes()[:60]
         assert c.post("/analyze", files={"file": ("cut.webm", cut, "audio/webm")}).status_code == 422
         assert r.json()["input"]["format"] == "ogg" and r.json()["model_version"]
+        assert "covid_19" in r.json() or not r.json()["cough_check"]["is_cough"]      # research: all outputs
+
+    # ---------------- production mode on a registered model version (SaMD controls, docs/regulatory/07)
+    import hashlib
+    import shutil
+    from cough import audit as auditmod, versioning
+    root = tmp_path / "models"
+    v, vdir = versioning.new_version(root, "minor")
+    shutil.copytree(art, vdir, dirs_exist_ok=True)
+    versioning.register(root, vdir, v, "major", cache, {"epochs": 2}, notes="test")
+    os.environ.update({"COUGH_ARTIFACTS": str(root), "COUGH_MODE": "production"})
+    importlib.reload(api)
+    ids = {"X-User-Id": "user-001", "X-Org-Id": "org-001"}
+    f = sorted(raw.glob("*.webm"))[0]
+    data = f.read_bytes()
+    with TestClient(api.app) as c:
+        assert c.get("/health").json()["integrity"] == "verified"                               # TC-VER-02
+        r = c.post("/analyze", files={"file": (f.name, data, "audio/webm")})
+        assert r.status_code == 401                                                             # TC-AUD-02
+        r = c.post("/analyze", files={"file": (f.name, data, "audio/webm")}, headers=ids)
+        assert r.status_code == 200, r.text
+        j = r.json()
+        assert "covid_19" not in j and "respiratory_symptoms" not in j                          # TC-INT-01
+        assert j["intended_use"].startswith("Detects whether") and "Not a medical device" in j["regulatory_status"]
+        assert j["model_version"] == vdir.name and r.headers["X-Request-ID"] == j["request_id"]
+        assert c.post("/analyze", files={"file": (f.name, data, "audio/webm")}, data={"latitude": "12.9"},
+                      headers=ids).status_code == 400                                           # TC-PHI-02
+        assert c.get("/examples").status_code == 404                                            # TC-INT-03
+        assert set(c.get("/model-info").json()["results"]) <= {"cough", "wet"}                  # TC-INT-04
+        recs = auditmod.find(Path(os.environ["COUGH_AUDIT_DIR"]), j["request_id"])              # TC-AUD-01
+        assert len(recs) == 1
+        rec = recs[0]
+        assert rec["user_id"] == "user-001" and rec["org_id"] == "org-001" and rec["model_version"] == vdir.name
+        assert rec["input_sha256"] == hashlib.sha256(data).hexdigest() and rec["output"] == j
+        assert rec["model_card_sha256"] == versioning.card_sha256(vdir)
+        assert auditmod.verify(Path(os.environ["COUGH_AUDIT_DIR"]))["ok"]                         # TC-AUD-03
+        store = Path(os.environ["COUGH_DATA_DIR"])
+        line = (store / "features.jsonl").read_text().splitlines()[-1]                          # TC-PHI-01
+        assert "latitude" not in line and "longitude" not in line and f.name not in line
+        assert not (store / "audio").exists()                                                   # TC-PHI-03
+        r = c.delete("/subjects/user-001", headers=ids)                                         # TC-PHI-05
+        assert r.status_code == 200 and r.json()["feature_records_deleted"] >= 1
+        assert "user-001" not in (store / "features.jsonl").read_text()
+    # tampered model file: production refuses to serve it                                      # TC-VER-03
+    mj = vdir / "models.joblib"
+    mj.chmod(0o666)
+    mj.write_bytes(mj.read_bytes() + b"x")
+    importlib.reload(api)
+    with TestClient(api.app) as c:
+        assert c.post("/analyze", files={"file": (f.name, data, "audio/webm")}, headers=ids).status_code == 503
+    for k in ("COUGH_MODE", "COUGH_ARTIFACTS"):
+        os.environ.pop(k, None)

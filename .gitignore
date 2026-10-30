@@ -10,3 +10,5 @@ artifacts_*/
 models/
 *.mp4
 samples/
+audit/
+data_store/

@@ -120,25 +120,37 @@ class FakeEngine:
     file with the real loader, exactly as the real engine does."""
     version = {"name": "coughvid_v0.0.1_fusion_test", "version": "0.0.1"}
     metrics = {"results": {}}
+    card_sha256 = "0" * 64
+    integrity = "verified"
 
     def analyse_file(self, path):
         x = load_audio(path)
         if len(x) < 1600:
             raise ValueError("no audio decoded")
         segs, snr = segment_coughs(x)
-        return {"recording": {"duration_s": round(len(x) / SR, 2), "coughs_found": len(segs), "snr_db": snr},
-                "cough_check": {"is_cough": bool(segs), "probability": 0.9}, "model_version": self.version["name"]}
+        res = {"recording": {"duration_s": round(len(x) / SR, 2), "coughs_found": len(segs), "snr_db": snr},
+               "cough_check": {"is_cough": bool(segs), "probability": 0.9}, "model_version": self.version["name"]}
+        return res, {"duration": len(x) / SR, "n_coughs": float(len(segs))}
+
+
+IDS = {"X-User-Id": "user-001", "X-Org-Id": "org-001"}
 
 
 @pytest.fixture(scope="module")
-def client():
+def client(tmp_path_factory):
     pytest.importorskip("torch")
     from fastapi.testclient import TestClient
     import cough.api as api
+    d = tmp_path_factory.mktemp("api")
+    old = api.AUDIT_DIR, api.DATA_DIR
+    api.AUDIT_DIR, api.DATA_DIR = d / "audit", d / "store"
+    api._cache.pop("a", None)
     api._cache["e"] = FakeEngine()
-    with TestClient(api.app) as c:
+    with TestClient(api.app, headers=IDS) as c:
         yield c
     api._cache.pop("e", None)
+    api._cache.pop("a", None)
+    api.AUDIT_DIR, api.DATA_DIR = old
 
 
 @needs_ffmpeg
@@ -227,3 +239,36 @@ def test_crashed_run_and_unadopted_legacy(tmp_path):
     assert versioning.load_registry(root)["versions"][0]["version"] == "1.0.0"
     v2, d2 = versioning.new_version(root, "minor")                       # previous run crashed before register
     assert v2 == "1.1.0" and d2.exists()
+
+
+# ------------------------------------------------------------------ audit and decoder limits through the API
+@needs_ffmpeg
+def test_tc_inp_05_decoder_time_limit(samples, monkeypatch):
+    import cough.audio as audio
+    monkeypatch.setattr(audio, "FFMPEG_TIMEOUT_S", 0.000001)
+    with pytest.raises(ValueError, match="took longer"):
+        audio.load_audio(samples["webm_opus"])
+
+
+@needs_ffmpeg
+def test_tc_aud_06_rejected_requests_are_audited(client):
+    import cough.api as api
+    from cough import audit as auditmod
+    r = client.post("/analyze", files={"file": ("x.png", REJECT["png"][0], "image/png")})
+    assert r.status_code == 415
+    recs = auditmod.find(api.AUDIT_DIR, r.json()["request_id"])
+    assert len(recs) == 1 and recs[0]["event"] == "rejected" and recs[0]["status"] == 415
+    assert recs[0]["input_sha256"] and recs[0]["user_id"] == "user-001"
+    assert auditmod.verify(api.AUDIT_DIR)["ok"]
+
+
+@needs_ffmpeg
+def test_tc_aud_07_no_result_without_audit_record(client, samples, monkeypatch):
+    import cough.api as api
+
+    def broken(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(api.audit(), "write", broken)
+    f = samples["wav_pcm16"]
+    r = client.post("/analyze", files={"file": (f.name, f.read_bytes(), "audio/wav")})
+    assert r.status_code == 503 and "cough_check" not in r.json()
